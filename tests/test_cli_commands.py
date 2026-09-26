@@ -60,7 +60,9 @@ def test_backtest_reports_a_bad_date_instead_of_a_traceback(runner):
 
 @pytest.mark.unit
 def test_help_lists_the_backtest_command(runner):
-    assert "backtest" in runner.invoke(m.app, ["--help"]).output
+    output = runner.invoke(m.app, ["--help"]).output
+    assert "backtest" in output
+    assert "discover" in output
 
 
 class _Result:
@@ -134,3 +136,80 @@ def test_backtest_reports_a_setup_failure_in_one_line(runner, monkeypatch):
     assert result.exit_code == 1
     assert "API key" in result.output
     assert "Traceback" not in result.output
+
+
+@pytest.mark.unit
+def test_discover_uses_explicit_tickers_and_writes_report(runner, monkeypatch, tmp_path):
+    from tradingagents.discovery import Candidate, DiscoveryResult
+
+    captured = {}
+
+    def _discover(tickers, as_of, **kwargs):
+        captured["tickers"] = tickers
+        captured["as_of"] = as_of
+        return DiscoveryResult(
+            as_of_date=as_of,
+            retrieved_at_utc="2026-09-27T00:00:00+00:00",
+            data_source="test",
+            data_source_url="https://example.test",
+            universe_source=kwargs["universe_source"],
+            universe_observed_at=kwargs["universe_observed_at"],
+            methodology="test",
+            configuration={},
+            candidates=[Candidate(
+                ticker="NVDA", observation_date=as_of, close=100,
+                avg_dollar_volume_20d=100_000_000, momentum_3m=.1,
+                momentum_6m=.2, momentum_12m=.3, distance_above_sma50=.1,
+                distance_above_sma200=.2, distance_from_52w_high=-.02,
+                annualized_volatility_63d=.3, score=80, rank=1,
+            )],
+            rejected=[],
+        )
+
+    monkeypatch.setattr(m, "discover_stocks", _discover)
+    result = runner.invoke(m.app, [
+        "discover", "--tickers", "nvda,nvda", "--as-of", "2026-09-26",
+        "--output", str(tmp_path),
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert captured["tickers"] == ["NVDA"]
+    assert (tmp_path / "summary.md").exists()
+    assert "# 1 NVDA" in result.output
+
+
+@pytest.mark.unit
+def test_discover_can_send_top_candidates_to_agents(runner, monkeypatch, tmp_path):
+    from tradingagents.discovery import DiscoveryResult
+
+    calls = []
+    monkeypatch.setattr(
+        m,
+        "discover_stocks",
+        lambda *args, **kwargs: DiscoveryResult(
+            as_of_date="2026-09-26",
+            retrieved_at_utc="2026-09-26T00:00:00+00:00",
+            data_source="test",
+            data_source_url="https://example.test",
+            universe_source="test",
+            universe_observed_at="2026-09-26",
+            methodology="test",
+            configuration={},
+            candidates=[],
+            rejected=[],
+        ),
+    )
+    monkeypatch.setattr(
+        m,
+        "analyze_top_candidates",
+        lambda result, count, output, **kwargs: calls.append((count, kwargs)),
+    )
+
+    result = runner.invoke(m.app, [
+        "discover", "--tickers", "NVDA", "--as-of", "2026-09-26",
+        "--analyze-top", "2", "--analysts", "market,news", "--output", str(tmp_path),
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert calls[0][0] == 2
+    assert calls[0][1]["selected_analysts"] == ["market", "news"]

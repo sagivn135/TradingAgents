@@ -1,4 +1,7 @@
 import sys
+from dataclasses import replace
+from datetime import date as calendar_date, datetime
+from pathlib import Path
 
 import typer
 
@@ -6,6 +9,15 @@ from cli.display import console
 from cli.run import run_analysis
 from tradingagents.backtest import iter_grid, run_backtest, summarize
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.discovery import (
+    DEFAULT_UNIVERSE_PATH,
+    ScreenConfig,
+    analyze_top_candidates,
+    discover_stocks,
+    load_universe,
+    parse_tickers,
+    write_discovery_report,
+)
 from tradingagents.portfolio import load_portfolio
 
 # prompt_toolkit's win32 output module is importable only on Windows (it asserts
@@ -120,10 +132,106 @@ def backtest(
         raise typer.Exit(code=1) from None
     console.print(summarize(result).render())
     console.print(f"\nRan {result.cells_run} cells, skipped {result.skipped}. Log: {result.log_path}")
-    for ticker, date, reason in result.failures:
-        console.print(f"[yellow]failed:[/yellow] {ticker} {date}: {reason}")
+    for ticker, failed_date, reason in result.failures:
+        console.print(f"[yellow]failed:[/yellow] {ticker} {failed_date}: {reason}")
     for ticker, reason in result.settlement_failures:
         console.print(f"[yellow]unsettled:[/yellow] {ticker}: {reason}")
+
+
+@app.command()
+def discover(
+    as_of: str = typer.Option(None, "--as-of", help="Point-in-time cutoff, YYYY-MM-DD"),
+    tickers: str = typer.Option(
+        None, "--tickers", help="Comma-separated universe; overrides --universe"
+    ),
+    universe: str = typer.Option(
+        str(DEFAULT_UNIVERSE_PATH), "--universe", help="Text file with one ticker per line"
+    ),
+    analyze_top: int = typer.Option(
+        0, "--analyze-top", min=0, help="Run TradingAgents for this many top-ranked stocks"
+    ),
+    analysts: str = typer.Option(
+        "market,news,fundamentals",
+        "--analysts",
+        help="Analysts used by --analyze-top",
+    ),
+    min_price: float = typer.Option(5.0, "--min-price", min=0.0),
+    min_dollar_volume: float = typer.Option(
+        20_000_000.0, "--min-dollar-volume", min=0.0, help="Minimum 20-day average"
+    ),
+    workers: int = typer.Option(4, "--workers", min=1, max=16),
+    checkpoint: bool | None = typer.Option(
+        None,
+        "--checkpoint/--no-checkpoint",
+        help="Enable checkpoint-resume for --analyze-top",
+    ),
+    output: str = typer.Option(None, "--output", help="Output directory"),
+):
+    """Rank a stock universe, then optionally research the leading candidates."""
+    cutoff = as_of or calendar_date.today().isoformat()
+    try:
+        if tickers:
+            names = parse_tickers(tickers)
+            universe_metadata = {
+                "source": "CLI --tickers",
+                "observed_at": datetime.now().astimezone().isoformat(),
+            }
+        else:
+            names, universe_metadata = load_universe(universe)
+        settings = replace(
+            ScreenConfig(),
+            min_price=min_price,
+            min_avg_dollar_volume=min_dollar_volume,
+            workers=workers,
+        )
+        result = discover_stocks(
+            names,
+            cutoff,
+            config=settings,
+            universe_source=universe_metadata["source"],
+            universe_observed_at=universe_metadata.get("observed_at", "unknown"),
+        )
+    except (OSError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(code=1) from None
+
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    destination = Path(output) if output else Path(DEFAULT_CONFIG["results_dir"]) / "discovery" / stamp
+    if analyze_top:
+        selected = [name.strip().lower() for name in analysts.split(",") if name.strip()]
+        graph_config = dict(DEFAULT_CONFIG)
+        if checkpoint is not None:
+            graph_config["checkpoint_enabled"] = checkpoint
+        console.print(
+            f"Screened {len(names)} symbols; analyzing the top "
+            f"{min(analyze_top, len(result.candidates))} with TradingAgents..."
+        )
+        try:
+            analyze_top_candidates(
+                result,
+                analyze_top,
+                destination,
+                selected_analysts=selected,
+                graph_config=graph_config,
+            )
+        except Exception as exc:
+            console.print(f"[red]Agent analysis could not start: {exc}[/red]")
+            raise typer.Exit(code=1) from None
+    summary_path = write_discovery_report(result, destination)
+
+    console.print(
+        f"Eligible: {len(result.candidates)}; rejected/unavailable: {len(result.rejected)}"
+    )
+    for candidate in result.candidates[:10]:
+        analysis = next(
+            (item.signal for item in result.analyses if item.ticker == candidate.ticker),
+            "screen only",
+        )
+        console.print(
+            f"#{candidate.rank:>2} {candidate.ticker:<8} score {candidate.score:>6.2f} "
+            f"6m {candidate.momentum_6m:+.1%}  agent: {analysis}"
+        )
+    console.print(f"Report: {summary_path}")
 
 
 if __name__ == "__main__":

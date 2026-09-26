@@ -199,6 +199,19 @@ python -m cli.main     # alternative: run directly from source
 ```
 You will see a screen where you can select your desired tickers, analysis date, LLM provider, research depth, and more. Your previous run's answers come back as the defaults, so pressing Enter accepts them. The `TRADINGAGENTS_*` variables in `.env` still skip their step entirely.
 
+To discover candidates before choosing a ticker, run the deterministic market
+screen. Add `--analyze-top 3` to send only its three highest-ranked candidates
+through the full multi-agent workflow:
+
+```bash
+tradingagents discover
+tradingagents discover --analyze-top 3 --checkpoint
+```
+
+The timestamped Markdown, CSV, and JSON outputs explain each rank and record the
+price source and observation date. See [docs/DISCOVERY.md](docs/DISCOVERY.md) for
+the scoring method and point-in-time limitations.
+
 ### Markets and tickers
 
 TradingAgents works with any market Yahoo Finance covers, using the exchange-suffixed ticker. Company identity and the alpha benchmark resolve automatically per market.
