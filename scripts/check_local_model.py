@@ -1,7 +1,8 @@
 """Check the configured local server and model IDs without running an analysis."""
 import json
+import os
 from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 
 from tradingagents.default_config import DEFAULT_CONFIG
 
@@ -12,12 +13,16 @@ def main():
         raise SystemExit("Set TRADINGAGENTS_LLM_PROVIDER=openai_compatible in .env")
     base = config["backend_url"]
     if not base or not base.startswith(("http://127.0.0.1:", "http://localhost:")):
-        raise SystemExit("This check expects a localhost LM Studio endpoint.")
+        raise SystemExit("This check expects a localhost OpenAI-compatible endpoint.")
+    headers = {}
+    if api_key := os.getenv("OPENAI_COMPATIBLE_API_KEY"):
+        headers["Authorization"] = f"Bearer {api_key}"
     try:
-        with urlopen(base.rstrip("/") + "/models", timeout=10) as response:
+        request = Request(base.rstrip("/") + "/models", headers=headers)
+        with urlopen(request, timeout=10) as response:
             models = {item["id"] for item in json.load(response)["data"]}
     except (URLError, ValueError, KeyError) as exc:
-        raise SystemExit(f"LM Studio check failed: {exc}") from exc
+        raise SystemExit(f"Local model server check failed: {exc}") from exc
     requested = {config["deep_think_llm"], config["quick_think_llm"]}
     missing = requested - models
     if missing:
